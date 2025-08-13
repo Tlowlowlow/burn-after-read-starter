@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nachricht lesen – Burn</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; form-action 'self';">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif; margin: 2rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-word; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Einmalnachricht</h1>
+  <p>Diese Nachricht wird <strong>einmalig</strong> angezeigt. Danach ist sie weg.</p>
+  <div id="status">Lade…</div>
+  <div id="content" class="mono"></div>
+
+  <script type="module">
+    const b64 = {
+      enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))),
+      dec: (str) => Uint8Array.from(atob(str), c => c.charCodeAt(0)).buffer
+    };
+
+    async function importKeyFromHash() {
+      const frag = location.hash.replace(/^#/, "");
+      if (!frag) throw new Error("Kein Schlüssel im Link (# fehlt).");
+      const raw = b64.dec(frag);
+      return await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["decrypt"]);
+    }
+
+    async function decrypt(key, packedB64) {
+      const packed = new Uint8Array(b64.dec(packedB64));
+      const iv = packed.slice(0, 12);
+      const data = packed.slice(12);
+      const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+      return new TextDecoder().decode(plainBuf);
+    }
+
+    async function run() {
+      const params = new URLSearchParams(location.search);
+      const id = params.get("id");
+      const token = params.get("token");
+      if (!id || !token) throw new Error("Fehlende Parameter.");
+
+      const key = await importKeyFromHash();
+
+      const r = await fetch(`/msg/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`, {
+        method: "GET",
+        cache: "no-store"
+      });
+      if (r.status === 404) throw new Error("Nicht gefunden oder bereits gelesen.");
+      if (!r.ok) throw new Error("API-Fehler.");
+      const { ciphertext } = await r.json();
+      const text = await decrypt(key, ciphertext);
+
+      document.getElementById("status").textContent = "✔ Entschlüsselt. Wird nicht gespeichert.";
+      document.getElementById("content").textContent = text;
+
+      // Best effort: Clipboard leeren beim Verlassen
+      window.addEventListener("beforeunload", () => {
+        document.getElementById("content").textContent = "";
+        history.replaceState({}, "", location.pathname);
+      });
+    }
+
+    run().catch(err => {
+      document.getElementById("status").textContent = "Fehler";
+      document.getElementById("content").textContent = err.message;
+    });
+  </script>
+</body>
+</html>

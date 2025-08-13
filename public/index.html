@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Burn After Read</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; form-action 'self';">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif; margin: 2rem; }
+    textarea { width: 100%; min-height: 8rem; }
+    input, button, textarea { font-size: 1rem; }
+    .row { margin: 0.75rem 0; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>Burn After Read</h1>
+  <p>Nachricht wird <strong>einmalig</strong> lesbar sein und danach gelöscht. Keine Previews, keine Speicherung im Server-Log. Screenshots kann niemand verhindern.</p>
+
+  <div class="row">
+    <label for="ttl">Ablauf (Sekunden, 60–86400):</label>
+    <input id="ttl" type="number" min="60" max="86400" value="600">
+  </div>
+  <div class="row">
+    <textarea id="msg" placeholder="Deine Nachricht…"></textarea>
+  </div>
+  <div class="row">
+    <button id="send">Link erzeugen</button>
+  </div>
+  <div class="row">
+    <div id="result" class="mono"></div>
+  </div>
+
+  <script type="module">
+    // Simple Base64 helpers
+    const b64 = {
+      enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))),
+      dec: (str) => Uint8Array.from(atob(str), c => c.charCodeAt(0)).buffer
+    };
+
+    async function genKey() {
+      const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+      const raw = await crypto.subtle.exportKey("raw", key);
+      return { key, rawB64: b64.enc(raw) };
+    }
+
+    async function encryptText(key, plaintext) {
+      const enc = new TextEncoder();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(plaintext));
+      // store iv + ciphertext together
+      const packed = new Uint8Array(iv.byteLength + cipherBuf.byteLength);
+      packed.set(iv, 0);
+      packed.set(new Uint8Array(cipherBuf), iv.byteLength);
+      return b64.enc(packed.buffer);
+    }
+
+    document.getElementById("send").addEventListener("click", async () => {
+      const text = (document.getElementById("msg").value || "").trim();
+      const ttl = parseInt(document.getElementById("ttl").value, 10);
+      if (!text) { alert("Bitte Text eingeben."); return; }
+      if (!(ttl >= 60 && ttl <= 86400)) { alert("TTL 60–86400s."); return; }
+
+      try {
+        const { key, rawB64 } = await genKey();
+        const ciphertext = await encryptText(key, text);
+
+        const r = await fetch("/msg", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({ ciphertext, ttlSeconds: ttl, maxReads: 1 })
+        });
+        if (!r.ok) throw new Error("API error");
+        const { id, token } = await r.json();
+        const url = `${location.origin}/read.html?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}#${rawB64}`;
+        document.getElementById("result").textContent = url;
+        navigator.clipboard.writeText(url).catch(() => {});
+        document.getElementById("msg").value = "";
+      } catch (e) {
+        alert("Fehler: " + e.message);
+      }
+    });
+  </script>
+</body>
+</html>
